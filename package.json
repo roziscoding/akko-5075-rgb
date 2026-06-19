@@ -1,0 +1,20 @@
+{
+  "name": "akko-5075-rgb",
+  "version": "1.0.0",
+  "description": "Open-protocol Linux RGB control for the Akko 5075 (Multi-modes) keyboard — web console + CLI, no proprietary driver.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "start": "bun --hot server.ts",
+    "probe": "bun probe.ts"
+  },
+  "dependencies": {
+    "node-hid": "^3.3.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
