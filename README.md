@@ -29,14 +29,25 @@ was verify it on the **Akko 5075 / K0055** and map the model-specific difference
 hardware palette presets, dazzle/rainbow, brightness, speed, and the built-in effect
 modes. Per-key addressing is the one piece still blocked (see §9).
 
-**Quick start**
+**Quick start — WebHID (no server, recommended)**
 
 ```bash
-bun install
-sudo install -m 0644 99-akko-hidraw.rules /etc/udev/rules.d/99-akko-hidraw.rules
+sudo install -m 0644 60-akko-hidraw.rules /etc/udev/rules.d/60-akko-hidraw.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger --action=add --subsystem-match=hidraw
-bun start            # -> http://localhost:3000
+# then just open index.html in Chrome/Edge and click "Connect"
+xdg-open index.html
 ```
+
+The console runs **entirely in the browser** via [WebHID](https://developer.mozilla.org/docs/Web/API/WebHID_API) —
+no Bun process, no `node-hid`, no HTTP backend. Chrome or Edge only (Firefox/Safari
+don't ship WebHID). If `file://` doesn't grant a secure context on your setup, serve
+the static file instead — still no keyboard access on the server side:
+
+```bash
+bun start            # static host -> http://localhost:3000 (no node-hid)
+```
+
+(The CLI helpers in §8 still use `node-hid`; run `bun install` for those.)
 
 ---
 
@@ -257,17 +268,25 @@ for directional effects (Wave, etc.).
 ## 7. Access without sudo (udev)
 
 The `/dev/hidraw*` nodes are root-only by default. Rule
-[`99-akko-hidraw.rules`](./99-akko-hidraw.rules) grants the active local user access
+[`60-akko-hidraw.rules`](./60-akko-hidraw.rules) grants the active local user access
 via `uaccess`:
 
 ```
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3151", ATTRS{idProduct}=="5002", TAG+="uaccess", MODE="0660"
 ```
 
+> ⚠️ **The filename number matters.** systemd applies `uaccess` from
+> `73-seat-late.rules`, so the tag must be set by a rule that runs *before* it — i.e.
+> numbered **< 73** (here `60-`, like `60-openrgb.rules`). A `99-` rule sets the tag
+> *after* the builtin already ran, so the ACL is never applied and you still need
+> `sudo`. (Check the db with `udevadm info /dev/hidraw8 | grep TAGS` — the tag can be
+> present yet have had no effect.)
+
 Install:
 
 ```bash
-sudo install -m 0644 99-akko-hidraw.rules /etc/udev/rules.d/99-akko-hidraw.rules
+sudo install -m 0644 60-akko-hidraw.rules /etc/udev/rules.d/60-akko-hidraw.rules
+sudo rm -f /etc/udev/rules.d/99-akko-hidraw.rules   # remove the old too-late rule, if installed
 sudo udevadm control --reload-rules
 sudo udevadm trigger --action=add --subsystem-match=hidraw   # --action=add is required;
                                                              # 'change' won't re-apply uaccess
@@ -283,13 +302,18 @@ use a group rule (`GROUP="input", MODE="0660"`) + `usermod -aG input <you>` inst
 
 Bun + `node-hid` (TypeScript). `bun add node-hid` once.
 
-**Web UI (main tool):**
-```bash
-bun --hot server.ts       # http://localhost:3000
-# color picker + hex, brightness, speed, dazzle toggle, effect dropdown,
-# zone selector (Principal / Lateral / Ambas).
-# GET /state reads both zones live (no cache); page loads current state on open.
+**Web UI (WebHID, main tool) — `index.html`:**
+```text
+Open index.html in Chrome/Edge and click "Connect" (or `bun start`).
+Talks to the keyboard directly from the browser — no backend, no node-hid.
+Controls: color picker + hex, brightness, speed, dazzle toggle, effect dropdown,
+zone selector (Main / Side / Both). Reads both zones live on connect;
+a previously-granted device auto-reconnects on reload.
 ```
+
+WebHID uses the same Feature-Report transport as the CLI: `sendFeatureReport(0, …)`
+(SET_FEATURE) and `receiveFeatureReport(0)` (GET_FEATURE) on the vendor config
+collection (`usagePage 0xFFFF`, `usage 0x02`). Still needs the udev rule in §7.
 
 **CLI helpers:**
 ```bash

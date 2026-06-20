@@ -1,146 +1,9 @@
-#!/usr/bin/env bun
-/**
- * Web RGB controller for the Akko Multi-modes keyboard — two zones.
- *
- *   bun --hot server.ts   ->   http://localhost:3000
- *
- * Zones: main keys (SET_LEDPARAM 0x07) and side bars (SET_SLEDPARAM 0x08).
- * options nibble (this board): 0x08 = single solid color, 0x07 = dazzle (rainbow).
- */
-
-import HID from "node-hid";
-
-const VID = 0x3151;
-const PID = 0x5002;
-const VENDOR_USAGE_PAGE = 0xffff;
-const LEN = 64;
-
-// per-zone command opcode
-const ZONE_CMD = { main: 0x07, side: 0x08 } as const;
-type Zone = keyof typeof ZONE_CMD;
-
-function checksum(data: number[], at: number): number[] {
-  const d = [...data];
-  const sum = d.slice(0, at).reduce((a, b) => a + b, 0);
-  d[at] = (255 - (sum & 255)) & 255;
-  return d;
-}
-
-function openVendor(): HID.HID {
-  const dev = HID.devices(VID, PID).find(
-    (d) => d.usagePage === VENDOR_USAGE_PAGE && d.interface === 2,
-  );
-  if (!dev?.path) throw new Error("keyboard vendor interface not found");
-  return new HID.HID(dev.path);
-}
-
-async function setLed(o: {
-  zones: Zone[];
-  mode: number;
-  speed: number;
-  r: number;
-  g: number;
-  b: number;
-  brightness: number;
-  dazzle: boolean;
-}) {
-  const bri = Math.max(0, Math.min(4, o.brightness | 0));
-  const mode = Math.max(0, Math.min(25, o.mode | 0));
-  const speed = Math.max(0, Math.min(4, o.speed | 0)); // UI speed: 4 = fastest
-  let first = true;
-  for (const z of o.zones) {
-    // side bars only support modes 0-5 — skip them for higher modes (apply only where it works)
-    if (z === "side" && mode > 5) continue;
-    // main zone speed byte is INVERTED (4 = slowest); side bars are normal
-    const speedByte = z === "main" ? 4 - speed : speed;
-    // side bars only animate Ripple (5) with dazzle — force it there regardless
-    const forceDazzle = z === "side" && mode === 5;
-    const options = o.dazzle || forceDazzle ? 0x07 : 0x08; // 0x07 rainbow, 0x08 RGB
-    const frame = checksum(
-      [ZONE_CMD[z], mode, speedByte, bri, options, o.r & 255, o.g & 255, o.b & 255],
-      8,
-    ).concat(new Array(LEN - 9).fill(0));
-    // Each zone in its own open/close with a small gap — sending two feature
-    // reports back-to-back on one handle drops the 2nd intermittently.
-    if (!first) await sleep(15);
-    first = false;
-    const hid = openVendor();
-    try {
-      hid.sendFeatureReport([0x00, ...frame]);
-    } finally {
-      hid.close();
-    }
-  }
-}
-
-// --- read current state (live, no cache) ---------------------------------
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-const MODES = [
-  "Off", "Constant", "Breathing", "Neon", "Wave", "Ripple", "Raindrop", "Snake",
-  "Reactive", "Converge", "Sine Wave", "Kaleidoscope", "Line Wave", "User Picture",
-  "Laser", "Circle Wave", "Rainbow", "Rain Down", "Meteor", "Reactive Off",
-  "Music Patterns", "Screen Sync", "Music Bars", "Train", "Fireworks", "Per-Key Color",
-];
-
-/** Send a GET command (Bit7 checksum) and read the live response. */
-async function readZone(hid: HID.HID, cmd: number): Promise<number[] | null> {
-  const frame = checksum([cmd, 0, 0, 0, 0, 0, 0, 0], 7).concat(
-    new Array(LEN - 8).fill(0),
-  );
-  hid.sendFeatureReport([0x00, ...frame]);
-  for (let i = 0; i < 5; i++) {
-    await sleep(70);
-    const resp = hid.getFeatureReport(0, LEN + 1);
-    const body = resp[0] === 0 ? resp.slice(1) : resp;
-    if (body[0] === cmd) return body;
-  }
-  return null;
-}
-
-function decodeZone(body: number[] | null, zone: "main" | "side") {
-  if (!body) return null;
-  const [mode, speed, brightness, options, r, g, b] = body.slice(1, 8);
-  const hex = "#" + [r, g, b].map((x) => x.toString(16).padStart(2, "0")).join("");
-  const low = options & 0x0f;
-  return {
-    mode,
-    modeName: MODES[mode] ?? `mode ${mode}`,
-    speed,
-    speedUi: zone === "main" ? 4 - speed : speed, // normalized: 4 = fastest
-    brightness,
-    options,
-    // color source: 0x00-0x06 = preset palette index, 0x07 = dazzle, 0x08 = custom RGB
-    source: low <= 6 ? "palette" : low === 7 ? "dazzle" : low === 8 ? "rgb" : "unknown",
-    palette: low <= 6 ? low : null,
-    dazzle: low === 7,
-    solid: low === 8,
-    color: hex,
-    rgb: { r, g, b },
-    raw: body.slice(0, 8).map((x) => x.toString(16).padStart(2, "0")).join(" "),
-  };
-}
-
-/** Open the device, read both zones live, close. */
-async function readState() {
-  const hid = openVendor();
-  try {
-    return {
-      main: decodeZone(await readZone(hid, 0x87), "main"),
-      side: decodeZone(await readZone(hid, 0x88), "side"),
-    };
-  } finally {
-    hid.close();
-  }
-}
-
-// --- page ----------------------------------------------------------------
-const html = `<!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Akko · Light Console</title>
+<title>Akko · Light Console (WebHID)</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -173,13 +36,21 @@ const html = `<!doctype html>
   }
 
   .bar{ display:flex; align-items:center; gap:12px; padding-bottom:18px; border-bottom:1px solid var(--line); }
-  .led{ width:11px; height:11px; border-radius:50%; background:var(--glow);
-        box-shadow:0 0 16px 1px var(--glow); flex:none; }
+  .led{ width:11px; height:11px; border-radius:50%; background:var(--muted);
+        box-shadow:none; flex:none; transition:.25s; }
+  body.connected .led{ background:var(--glow); box-shadow:0 0 16px 1px var(--glow); }
   .brand{ font-weight:700; letter-spacing:.16em; text-transform:uppercase; font-size:.92rem;
           display:flex; gap:.6ch; align-items:center; }
   .brand i{ color:var(--glow); font-style:normal; }
   .brand span{ color:var(--muted); font-weight:500; letter-spacing:.2em; font-size:.82em; }
-  .dev{ margin-left:auto; font-family:'JetBrains Mono',monospace; font-size:.76rem; color:var(--muted); letter-spacing:.06em; }
+  .conn{ margin-left:auto; display:flex; align-items:center; gap:12px; }
+  .dev{ font-family:'JetBrains Mono',monospace; font-size:.76rem; color:var(--muted); letter-spacing:.06em; }
+  #connect{ font:inherit; font-weight:600; letter-spacing:.1em; text-transform:uppercase; font-size:.7rem;
+            padding:.5rem 1rem; border:1px solid color-mix(in srgb,var(--glow) 55%, transparent);
+            border-radius:9px; cursor:pointer; color:var(--text);
+            background:color-mix(in srgb,var(--glow) 14%, var(--well)); transition:.18s; }
+  #connect:hover{ background:color-mix(in srgb,var(--glow) 24%, var(--well)); }
+  body.connected #connect{ display:none; }
 
   .grid{ display:grid; grid-template-columns:196px 1fr; gap:28px; padding:26px 0; }
   .eyebrow{ font-size:.64rem; font-weight:600; letter-spacing:.24em; text-transform:uppercase;
@@ -234,6 +105,9 @@ const html = `<!doctype html>
            font-family:'JetBrains Mono',monospace; letter-spacing:.02em; }
 
   .dim{ opacity:.3; pointer-events:none; filter:grayscale(.4); }
+  /* gate every control until a device is connected */
+  body:not(.connected) .grid,
+  body:not(.connected) .foot .apply{ opacity:.3; pointer-events:none; filter:grayscale(.4); }
   :focus-visible{ outline:2px solid var(--glow); outline-offset:2px; }
 
   @media (max-width:560px){ .grid{ grid-template-columns:1fr; } .light{ max-width:230px; margin:0 auto; } }
@@ -250,7 +124,10 @@ const html = `<!doctype html>
     <header class="bar">
       <span class="led" aria-hidden="true"></span>
       <span class="brand">AKKO <i>/</i> <span>Light Console</span></span>
-      <span class="dev">3151:5002</span>
+      <div class="conn">
+        <span class="dev" id="dev">3151:5002</span>
+        <button id="connect" type="button">Connect</button>
+      </div>
     </header>
 
     <div class="grid">
@@ -265,9 +142,9 @@ const html = `<!doctype html>
         <div>
           <div class="eyebrow">Zone</div>
           <div class="seg" id="zoneSeg">
-            <button type="button" data-z="main" class="active">Principal</button>
-            <button type="button" data-z="side">Lateral</button>
-            <button type="button" data-z="both">Ambas</button>
+            <button type="button" data-z="main" class="active">Main</button>
+            <button type="button" data-z="side">Side</button>
+            <button type="button" data-z="both">Both</button>
           </div>
           <select id="zone" hidden>
             <option value="main">main</option><option value="side">side</option><option value="both">both</option>
@@ -298,6 +175,179 @@ const html = `<!doctype html>
     <div id="status"></div>
   </main>
 <script>
+  // ───────────────────────── Akko protocol over WebHID ─────────────────────
+  // Direct, server-less port of server.ts. The keyboard speaks the RongYuan
+  // vendor HID protocol via Feature Reports; WebHID's send/receiveFeatureReport
+  // map 1:1 onto node-hid's send/getFeatureReport.
+  const VID = 0x3151, PID = 0x5002, LEN = 64;
+  const VENDOR_USAGE_PAGE = 0xffff, VENDOR_USAGE = 0x0002; // interface 2, vendor config
+  const ZONE_CMD = { main: 0x07, side: 0x08 };
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v | 0));
+
+  function checksum(data, at){
+    const d = data.slice();
+    let sum = 0; for (let i = 0; i < at; i++) sum += d[i];
+    d[at] = (255 - (sum & 255)) & 255;
+    return d;
+  }
+
+  let device = null;
+
+  function isVendorDev(d){
+    return d.vendorId === VID && d.productId === PID &&
+      (d.collections || []).some((c) => c.usagePage === VENDOR_USAGE_PAGE && c.usage === VENDOR_USAGE);
+  }
+
+  async function adopt(d){
+    if (!d) return null;
+    if (!d.opened) await d.open();
+    device = d;
+    document.body.classList.add('connected');
+    document.getElementById('dev').textContent = (d.productName || '3151:5002');
+    return d;
+  }
+
+  // Reuse an already-granted device (no chooser); needs no user gesture.
+  async function tryReconnect(){
+    if (!navigator.hid) return null;
+    const granted = (await navigator.hid.getDevices()).find(isVendorDev);
+    return granted ? adopt(granted) : null;
+  }
+
+  // Show the chooser (must be called from a user gesture).
+  async function requestConnect(){
+    if (!navigator.hid){
+      status.textContent = '✗ this browser has no WebHID support — use Chrome or Edge';
+      return null;
+    }
+    const picked = (await navigator.hid.requestDevice({
+      filters: [{ vendorId: VID, productId: PID, usagePage: VENDOR_USAGE_PAGE, usage: VENDOR_USAGE }],
+    })).find(isVendorDev);
+    if (!picked){ status.textContent = '✗ vendor interface not found'; return null; }
+    return adopt(picked);
+  }
+
+  const zoneGet = (z) => z === 'main' ? 0x87 : 0x88;
+  const hexFrame = (f) => f.slice(0, 9).map((x) => x.toString(16).padStart(2, '0')).join(' ');
+
+  // Read a zone back and check the hardware matches what we asked for
+  // (mode + color source + RGB; firmware ignores RGB unless source is custom 0x08).
+  async function zoneMatches(z, want){
+    const body = await readZone(zoneGet(z));
+    if (!body) return false;
+    const mode = body[1], options = body[4], r = body[5], g = body[6], b = body[7];
+    const okRgb = (want.options & 0x0f) !== 0x08 || (r === want.r && g === want.g && b === want.b);
+    return mode === want.mode && (options & 0x0f) === (want.options & 0x0f) && okRgb;
+  }
+
+  // Returns { sent:[zones], skipped:[zones], errors:["zone: msg"] } so the UI
+  // can report exactly what happened per zone.
+  //
+  // Two phases to minimise the visible flicker: first fire every zone's write
+  // back-to-back (gapped, NO readback in between — a GET between the two SETs is
+  // what makes the firmware drop the 2nd), THEN read each zone back and resend
+  // only the one(s) that didn't stick. Happy path = one write per zone = no blink.
+  async function setLed(o){
+    if (!device) throw new Error('keyboard not connected');
+    if (!device.opened) await device.open();
+    const bri = clamp(o.brightness, 0, 4);
+    const mode = clamp(o.mode, 0, 25);
+    const speed = clamp(o.speed, 0, 4); // UI speed: 4 = fastest
+    const sent = [], skipped = [], errors = [];
+
+    const jobs = [];
+    for (const z of o.zones){
+      // side bars only support modes 0-5 — apply only where it works
+      if (z === 'side' && mode > 5){ skipped.push(z); continue; }
+      // main zone speed byte is INVERTED (4 = slowest); side bars are normal
+      const speedByte = z === 'main' ? 4 - speed : speed;
+      // side bars only animate Ripple (5) with dazzle — force it there regardless
+      const forceDazzle = z === 'side' && mode === 5;
+      const options = (o.dazzle || forceDazzle) ? 0x07 : 0x08; // 0x07 rainbow, 0x08 RGB
+      const frame = checksum(
+        [ZONE_CMD[z], mode, speedByte, bri, options, o.r & 255, o.g & 255, o.b & 255],
+        8,
+      ).concat(new Array(LEN - 9).fill(0));
+      jobs.push({ z, frame, want: { mode, options, r: o.r & 255, g: o.g & 255, b: o.b & 255 } });
+    }
+
+    try {
+      // Phase 1 — fire all writes, gapped, no readback between them.
+      for (let i = 0; i < jobs.length; i++){
+        if (i) await sleep(60);
+        await device.sendFeatureReport(0, new Uint8Array(jobs[i].frame));
+        console.log('[akko] sent ' + jobs[i].z, hexFrame(jobs[i].frame));
+      }
+      // Phase 2 — verify each; resend only the zones that were dropped.
+      for (const j of jobs){
+        await sleep(45);
+        let ok = await zoneMatches(j.z, j.want);
+        for (let attempt = 2; !ok && attempt <= 4; attempt++){
+          console.warn('[akko] ' + j.z + ' dropped — resend (try ' + attempt + ')');
+          await device.sendFeatureReport(0, new Uint8Array(j.frame));
+          await sleep(45);
+          ok = await zoneMatches(j.z, j.want);
+        }
+        if (ok) sent.push(j.z);
+        else errors.push(j.z + ': not confirmed after retries');
+      }
+    } catch (e) {
+      console.error('[akko] send FAILED', e);
+      errors.push(String(e && e.message ? e.message : e));
+    }
+    return { sent, skipped, errors };
+  }
+
+  const MODES = ['Off','Constant','Breathing','Neon','Wave','Ripple','Raindrop','Snake',
+    'Reactive','Converge','Sine Wave','Kaleidoscope','Line Wave','User Picture','Laser',
+    'Circle Wave','Rainbow','Rain Down','Meteor','Reactive Off','Music Patterns',
+    'Screen Sync','Music Bars','Train','Fireworks','Per-Key Color'];
+
+  // Send a GET command (Bit7 checksum) and read the live response.
+  async function readZone(cmd){
+    const frame = checksum([cmd,0,0,0,0,0,0,0], 7).concat(new Array(LEN - 8).fill(0));
+    await device.sendFeatureReport(0, new Uint8Array(frame));
+    for (let i = 0; i < 5; i++){
+      await sleep(70);
+      let view;
+      try { view = await device.receiveFeatureReport(0); } catch (e) { continue; }
+      let body = Array.from(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+      // receiveFeatureReport(0) excludes the report id; guard in case a 0 slips in
+      if (body[0] === 0 && body[1] === cmd) body = body.slice(1);
+      if (body[0] === cmd) return body;
+    }
+    return null;
+  }
+
+  function decodeZone(body, zone){
+    if (!body) return null;
+    const [mode, speed, brightness, options, r, g, b] = body.slice(1, 8);
+    const hex = '#' + [r, g, b].map((x) => x.toString(16).padStart(2, '0')).join('');
+    const low = options & 0x0f;
+    return {
+      mode, modeName: MODES[mode] || ('mode ' + mode),
+      speed, speedUi: zone === 'main' ? 4 - speed : speed, // normalized: 4 = fastest
+      brightness, options,
+      source: low <= 6 ? 'palette' : low === 7 ? 'dazzle' : low === 8 ? 'rgb' : 'unknown',
+      palette: low <= 6 ? low : null,
+      dazzle: low === 7, solid: low === 8,
+      color: hex, rgb: { r, g, b },
+      raw: body.slice(0, 8).map((x) => x.toString(16).padStart(2, '0')).join(' '),
+    };
+  }
+
+  async function readState(){
+    return {
+      main: decodeZone(await readZone(0x87), 'main'),
+      side: decodeZone(await readZone(0x88), 'side'),
+    };
+  }
+
+  const ZONES = { main: ['main'], side: ['side'], both: ['main', 'side'] };
+
+  // ───────────────────────────────── UI ────────────────────────────────────
   const root = document.documentElement;
   const zone = document.getElementById('zone');
   const zoneSeg = document.getElementById('zoneSeg');
@@ -314,6 +364,7 @@ const html = `<!doctype html>
   const status = document.getElementById('status');
   const telMain = document.getElementById('tel-main');
   const telSide = document.getElementById('tel-side');
+  const connectBtn = document.getElementById('connect');
 
   const EFFECT_NAMES = {0:'Off',1:'Constant',2:'Breathing',3:'Neon',4:'Wave',5:'Ripple',
     6:'Raindrop',7:'Snake',8:'Reactive',9:'Converge',10:'Sine Wave',11:'Kaleidoscope',
@@ -321,15 +372,13 @@ const html = `<!doctype html>
     19:'Reactive Off',23:'Train',24:'Fireworks'};
   const MAIN_MODES = [0,1,2,3,4,5,6,7,8,9,10,11,12,14,15,16,17,18,19,23,24];
   const SIDE_MODES = [0,1,2,3,4,5];
-  // 'side' is limited to 0-5; 'main' and 'both' show the full list (both applies
-  // higher modes to the main zone only — the backend skips the side for those)
   const modesFor = (z) => z === 'side' ? SIDE_MODES : MAIN_MODES;
   function rebuildEffects(z){
     const cur = effect.value;
     effect.innerHTML = modesFor(z).map(function(m){
       return '<option value="'+m+'">'+(m<10?'0':'')+m+' · '+EFFECT_NAMES[m]+'</option>';
     }).join('');
-    if (modesFor(z).indexOf(+cur) >= 0) effect.value = cur; // keep selection if still valid
+    if (modesFor(z).indexOf(+cur) >= 0) effect.value = cur;
   }
 
   const norm = (v) => {
@@ -338,8 +387,6 @@ const html = `<!doctype html>
     return /^#[0-9a-fA-F]{6}$/.test(v) ? v.toLowerCase() : null;
   };
 
-  // Light the console with the current color; rainbow animates --glow via @property.
-  // Neon ignores RGB -> dim the well (but not when the hardware shows rainbow).
   function syncColorUi(){
     const sideRipple = zone.value !== 'main' && +effect.value === 5;
     const rainbow = dazzle.checked || sideRipple;
@@ -348,7 +395,6 @@ const html = `<!doctype html>
     colorBox.classList.toggle('dim', ignored && !rainbow);
     hex.classList.toggle('dim', ignored && !rainbow);
     if (!rainbow) root.style.setProperty('--glow', picker.value);
-    // speed only matters for animated effects (Off / Constant are static)
     speedField.style.display = (+effect.value <= 1) ? 'none' : '';
   }
 
@@ -364,7 +410,6 @@ const html = `<!doctype html>
   effect.onchange = () => { syncColorUi(); set.click(); };
   dazzle.onchange = () => { syncColorUi(); set.click(); };
 
-  // segmented zone control (keeps the hidden <select id=zone> as the value source)
   function selectZone(z){
     zone.value = z;
     Array.prototype.forEach.call(zoneSeg.children, function(b){ b.classList.toggle('active', b.dataset.z === z); });
@@ -377,57 +422,59 @@ const html = `<!doctype html>
     if (j && j.side) telSide.textContent = j.side.raw;
   }
   async function refreshTelemetry(){
-    try { const r = await fetch('/state'); paintTelemetry(await r.json()); } catch (e) {}
+    if (!device) return;
+    try { paintTelemetry(await readState()); } catch (e) {}
   }
 
   set.onclick = async () => {
+    if (!device){ status.textContent = '✗ connect the keyboard first'; return; }
     const n = norm(hex.value) || '#000000';
     hex.value = n;
     const label = dazzle.checked ? 'rainbow' : n;
+    const r = parseInt(n.slice(1, 3), 16), g = parseInt(n.slice(3, 5), 16), b = parseInt(n.slice(5, 7), 16);
     status.textContent = '> ' + label + ' · bri ' + bri.value + ' · [' + zone.value + ']';
     try {
-      const res = await fetch('/set', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          zone: zone.value, hex: n, brightness: +bri.value, dazzle: dazzle.checked,
-          mode: +effect.value, speed: +spd.value,
-        }),
+      const res = await setLed({
+        zones: ZONES[zone.value] || ['main'],
+        mode: +effect.value, speed: +spd.value,
+        r, g, b, brightness: +bri.value, dazzle: dazzle.checked,
       });
-      const j = await res.json();
       let hint = '';
-      if (zone.value !== 'main' && +effect.value === 5) hint = ' · ripple lateral usa rainbow';
-      else if (zone.value === 'both' && +effect.value > 5) hint = ' · efeito só na principal';
-      status.textContent = j.ok
-        ? '✓ ' + label + ' · bri ' + bri.value + ' · [' + zone.value + ']' + hint
-        : '✗ ' + (j.error || 'failed');
+      if (res.skipped.length) hint += ' · skipped ' + res.skipped.join('+') + ' (mode unsupported on side)';
+      else if (zone.value !== 'main' && +effect.value === 5) hint = ' · side ripple uses rainbow';
+      if (res.errors.length){
+        status.textContent = '✗ ' + res.errors.join(' | ') + (res.sent.length ? ' (sent ' + res.sent.join('+') + ')' : '');
+      } else {
+        status.textContent = '✓ sent ' + (res.sent.join('+') || '—') + ' · ' + label + ' · bri ' + bri.value + hint;
+      }
       refreshTelemetry();
     } catch (e) { status.textContent = '✗ ' + e; }
   };
 
   // Preset palette (hardware Fn colors) mapped on this unit.
-  const PALETTE = ['vermelho','verde','azul','laranja','rosa','amarelo','branco'];
+  const PALETTE = ['red','green','blue','orange','pink','yellow','white'];
   const PALETTE_HEX = ['#ff0000','#00ff00','#0000ff','#ff7300','#ff66cc','#ffff00','#ffffff'];
 
   async function loadZone(z){
     rebuildEffects(z);
     syncColorUi();
+    if (!device){ status.textContent = 'connect the keyboard to start'; return; }
     if (z === 'both'){
-      status.textContent = 'ambas — escolha Principal ou Lateral pra ver o estado';
+      status.textContent = 'both — pick Main or Side to see state';
       refreshTelemetry();
       return;
     }
-    status.textContent = 'lendo estado da zona...';
+    status.textContent = 'reading zone state...';
     try {
-      const res = await fetch('/state');
-      const j = await res.json();
+      const j = await readState();
       paintTelemetry(j);
       const s = j && j[z];
-      if (!s){ status.textContent = '✗ não consegui ler o estado'; return; }
+      if (!s){ status.textContent = '✗ could not read state'; return; }
       if (s.source === 'palette'){
         const c = PALETTE_HEX[s.palette] || '#000000';
         picker.value = c; hex.value = c; dazzle.checked = false;
         status.textContent = 'preset ' + s.palette + ' · ' + (PALETTE[s.palette] || '?')
-          + ' · bri ' + s.brightness + ' — mexa pra virar RGB';
+          + ' · bri ' + s.brightness + ' — tweak to switch to RGB';
       } else {
         picker.value = s.color; hex.value = s.color; dazzle.checked = s.dazzle;
         status.textContent = (s.dazzle ? 'rainbow' : s.color) + ' · bri ' + s.brightness + ' · ' + s.modeName;
@@ -439,68 +486,34 @@ const html = `<!doctype html>
     } catch (e) { status.textContent = '✗ ' + e; }
   }
 
-  selectZone('main');   // initial active zone + live state load
+  // ───────────────────────────── connection wiring ─────────────────────────
+  connectBtn.onclick = async () => {
+    try {
+      const d = await requestConnect();
+      if (d) selectZone(zone.value || 'main');
+    } catch (e) { status.textContent = '✗ ' + e; }
+  };
+
+  if (navigator.hid){
+    navigator.hid.addEventListener('disconnect', (e) => {
+      if (e.device === device){
+        device = null;
+        document.body.classList.remove('connected');
+        document.getElementById('dev').textContent = '3151:5002';
+        status.textContent = '✗ keyboard disconnected';
+      }
+    });
+  }
+
+  // Build the effect list, then try to reuse a previously-granted device.
+  rebuildEffects('main');
+  syncColorUi();
+  (async () => {
+    const d = await tryReconnect();
+    if (d) selectZone('main');
+    else if (!navigator.hid) status.textContent = '✗ browser has no WebHID — use Chrome/Edge';
+    else status.textContent = 'click Connect to choose the keyboard';
+  })();
 </script>
 </body>
-</html>`;
-
-// --- server --------------------------------------------------------------
-const ZONES: Record<string, Zone[]> = {
-  main: ["main"],
-  side: ["side"],
-  both: ["main", "side"],
-};
-
-Bun.serve({
-  port: 3000,
-  routes: {
-    "/": () => new Response(html, { headers: { "content-type": "text/html" } }),
-    "/state": {
-      GET: async () => {
-        try {
-          const state = await readState(); // live read, no cache
-          return Response.json(
-            { ok: true, ...state },
-            { headers: { "cache-control": "no-store, max-age=0" } },
-          );
-        } catch (e) {
-          return Response.json({ ok: false, error: String(e) }, { status: 500 });
-        }
-      },
-    },
-    "/set": {
-      POST: async (req) => {
-        try {
-          const body = (await req.json()) as {
-            zone?: string;
-            hex?: string;
-            brightness?: number;
-            dazzle?: boolean;
-            mode?: number;
-            speed?: number;
-          };
-          const zones = ZONES[body.zone ?? "main"];
-          if (!zones) return Response.json({ ok: false, error: "bad zone" }, { status: 400 });
-          const m = /^#?([0-9a-f]{6})$/i.exec(body.hex ?? "");
-          if (!m) return Response.json({ ok: false, error: "bad hex" }, { status: 400 });
-          const r = parseInt(m[1].slice(0, 2), 16);
-          const g = parseInt(m[1].slice(2, 4), 16);
-          const b = parseInt(m[1].slice(4, 6), 16);
-          const bri = Math.max(0, Math.min(4, body.brightness ?? 4));
-          const mode = Math.max(0, Math.min(25, body.mode ?? 1));
-          const speed = Math.max(0, Math.min(4, body.speed ?? 0));
-          const dazzle = !!body.dazzle;
-          await setLed({ zones, mode, speed, r, g, b, brightness: bri, dazzle });
-          console.log(
-            `set [${zones.join("+")}] mode=${mode} spd=${speed} ${dazzle ? "dazzle" : "#" + m[1]} bri=${bri}`,
-          );
-          return Response.json({ ok: true });
-        } catch (e) {
-          return Response.json({ ok: false, error: String(e) }, { status: 500 });
-        }
-      },
-    },
-  },
-});
-
-console.log("Akko RGB server -> http://localhost:3000");
+</html>
