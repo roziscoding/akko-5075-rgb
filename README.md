@@ -324,6 +324,22 @@ bun palidx.ts 3           # main palette index (options low nibble 0-6)
 bun userpic.ts ff0000     # per-key experiment (0x0C — currently a no-op, see §9)
 ```
 
+**Rust CLI (`cli/`, Linux x86_64):**
+```bash
+mise use -g github:roziscoding/akko-5075-rgb
+
+akko-rgb status                        # current lighting of each zone
+akko-rgb effects                       # list effects
+akko-rgb color ff3700                  # solid color on both zones
+akko-rgb color '#ff3700' --zone side   # one zone: all, keys or side
+akko-rgb set -e wave -s 3 -b 2 -c 00ff00
+akko-rgb set -e breathing --rainbow
+akko-rgb off
+```
+
+Only the settings you pass change. Needs the udev rule in §7. Releases are cut from
+Conventional Commits on `main`.
+
 ---
 
 ## 9. Status / Next steps

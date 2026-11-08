@@ -1,0 +1,17 @@
+[package]
+name = "akko-rgb"
+version = "0.0.0"
+edition = "2024"
+description = "Control the RGB lighting of the Akko 5075 (K0055) keyboard"
+license = "MIT"
+repository = "https://github.com/roziscoding/akko-5075-rgb"
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hidapi = "2"
+
+[profile.release]
+lto = true
+strip = true
