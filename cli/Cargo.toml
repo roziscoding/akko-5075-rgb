@@ -1,6 +1,6 @@
 [package]
 name = "akko-rgb"
-version = "0.0.0"
+version = "1.0.0"
 edition = "2024"
 description = "Control the RGB lighting of the Akko 5075 (K0055) keyboard"
 license = "MIT"
